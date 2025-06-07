@@ -1,0 +1,141 @@
+---
+title: "Calibration Assignment Pt 1"
+author: Eva Newby
+format: html
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+## Load libraries, read in data and functions
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(here)
+
+# Read in data
+msage = readRDS(here("msage.RDS"))
+
+# Look at data to determine high flow month. Here we choose June
+msage %>% filter(obs == max(obs))
+
+# Read in function
+source(here("compute_highflowmetrics.R"))
+```
+
+## Apply metrics to all runs
+```{r}
+# First rearrange so we can plot all results
+msagel = msage %>% gather(key="run",value="str", -date, -month, -day, -year, -wy,-obs)
+
+# Use apply to compute for all the data
+res = msage %>% select(-date, -month, -day, -year, -wy, -obs ) %>%
+  apply(2, FUN=compute_highflowmetrics, 
+        o=msage$obs, month=msage$month, 
+        day=msage$day, 
+        year=msage$year,
+        wy=msage$wy)
+
+# Extract information from the list
+results = as.data.frame(matrix(unlist(res), byrow=T, ncol=4))
+
+colnames(results)=c("annual_max_err",
+                    "annual_max_cor", 
+                    "high_month_err",
+                    "high_month_cor")
+
+# Summarize acceptable values
+summary(results)
+
+# Graph range of performance measures
+resultsl = results %>% 
+  gather(key="metric", value="value")
+
+ggplot(resultsl, aes(metric, value)) +
+  geom_boxplot()+
+  facet_wrap(~metric, scales="free")
+
+```
+
+## Define thresholds, select acceptable runs
+```{r}
+# Summarize results to define thresholds (top 30% for correlations, bottom 30% for errors)
+thresholds <- results %>%
+  summarize(
+    cor_threshold_annual = quantile(annual_max_cor, 0.70, na.rm = TRUE),
+    cor_threshold_month  = quantile(high_month_cor, 0.70, na.rm = TRUE),
+    err_threshold_annual = quantile(abs(annual_max_err), 0.30, na.rm = TRUE),
+    err_threshold_month  = quantile(abs(high_month_err), 0.30, na.rm = TRUE)
+  )
+
+# Add run IDs for tracking
+ID = msage %>% select(-date, -month, -day, -year, -wy, -obs ) %>% 
+  colnames()
+
+results$id = ID
+
+# Filter for acceptable parameter sets based on computed thresholds
+accept_par <- subset(results, 
+                     annual_max_cor > thresholds$cor_threshold_annual & 
+                     high_month_cor > thresholds$cor_threshold_month & 
+                     abs(annual_max_err) < thresholds$err_threshold_annual & 
+                     abs(high_month_err) < thresholds$err_threshold_month)
+
+# Number of acceptable parameter sets
+nrow(accept_par)
+```
+
+## Choose best parameter set
+```{r}
+# Define a combined score based on your metric (maximize high month correlation and minimize error)
+results$score <- results$high_month_cor - abs(results$high_month_err)
+
+# Identify best run based on combined score
+best_par_combined <- which.max(results$score)
+
+# Extract corresponding run ID (for quiz submission)
+best_param_id <- results$id[best_par_combined]
+
+# Print this out for Calibration Quiz submission
+print(best_param_id)
+```
+
+## Plot Results
+```{r}
+# Flag whether each run is acceptable
+msagel$accept = ifelse(msagel$run %in% accept_par$id, TRUE, FALSE)
+
+# Plot all acceptable runs as time series
+ggplot(subset(msagel, accept), aes(as.Date(date), str)) + 
+  geom_line() +
+  labs(title="Time Series of Acceptable Runs",
+       x="Date",
+       y="Streamflow")
+
+# Summarize monthly means
+msagel_mth = msagel %>% 
+  select(-date,-day) %>%
+  group_by(month, wy, run, accept) %>% 
+  summarise(str=mean(str, na.rm=T), obs=mean(obs, na.rm=T))
+
+# Plot June flow (high flow month) for acceptable runs
+ggplot(subset(msagel_mth, month==6 & accept),
+       aes(wy, str, group=wy))+ 
+  geom_boxplot() +
+  geom_point(aes(wy, obs), col="red") + 
+  labs(title="June Flow: Acceptable Runs vs Observed",
+       y="Streamflow", 
+       x="Water Year")
+
+# Compare all runs to mean observed June flow
+mean_june_obs = mean(subset(msagel_mth, month==6)$obs) 
+
+ggplot(subset(msagel_mth, month==6), aes(accept, str)) + 
+  geom_boxplot() +
+  geom_hline(yintercept=mean_june_obs, col="red") + 
+  labs(title="June Flow vs Mean Observed Flow",
+       y="Streamflow", 
+       x="Acceptable (TRUE/FALSE)")
+
+```
+
