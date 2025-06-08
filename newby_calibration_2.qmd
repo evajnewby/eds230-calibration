@@ -1,0 +1,248 @@
+---
+title: "Calibration Part 2"
+author: "Eva Newby"
+format: 
+  html:
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+editor_options: 
+  chunk_output_type: console
+---
+## Load packages and source function 
+```{r}
+library(tidyverse)
+library(here)
+library(dplyr)
+library(gridExtra)
+
+# source function
+source(here("compute_highflowmetrics.R"))
+msage <- readRDS(here('msage.RDS'))
+```
+
+## Part 1 Calibration 
+```{r}
+# Apply metrics to all runs
+msagel = msage %>% gather(key="run", value="str", -date, -month, -day, -year, -wy, -obs)
+
+# Use apply to compute for all the data
+res = msage %>% select(-date, -month, -day, -year, -wy, -obs) %>%
+  apply(2, FUN=compute_highflowmetrics, 
+        o=msage$obs, month=msage$month, 
+        day=msage$day, 
+        year=msage$year,
+        wy=msage$wy)
+
+# Extract information from the list
+results = as.data.frame(matrix(unlist(res), byrow=T, ncol=4))
+colnames(results)=c("annual_max_err",
+                    "annual_max_cor", 
+                    "high_month_err",
+                    "high_month_cor")
+
+# Summarize acceptable values
+summary(results)
+
+# Graph range of performance measures
+resultsl = results %>% 
+  gather(key="metric", value="value")
+ggplot(resultsl, aes(metric, value)) +
+  geom_boxplot()+
+  facet_wrap(~metric, scales="free")
+
+# Define thresholds, select acceptable runs
+thresholds <- results %>%
+  summarize(
+    cor_threshold_annual = quantile(annual_max_cor, 0.70, na.rm = TRUE),
+    cor_threshold_month  = quantile(high_month_cor, 0.70, na.rm = TRUE),
+    err_threshold_annual = quantile(abs(annual_max_err), 0.30, na.rm = TRUE),
+    err_threshold_month  = quantile(abs(high_month_err), 0.30, na.rm = TRUE)
+  )
+
+# Add run IDs for tracking
+ID = msage %>% select(-date, -month, -day, -year, -wy, -obs) %>% 
+  colnames()
+results$id = ID
+
+# Filter for acceptable parameter sets based on computed thresholds
+accept_par <- subset(results, 
+                     annual_max_cor > thresholds$cor_threshold_annual & 
+                     high_month_cor > thresholds$cor_threshold_month & 
+                     abs(annual_max_err) < thresholds$err_threshold_annual & 
+                     abs(high_month_err) < thresholds$err_threshold_month)
+
+# Number of acceptable parameter sets
+print(paste("Number of acceptable parameter sets:", nrow(accept_par)))
+
+# Choose best parameter set
+results$score <- results$high_month_cor - abs(results$high_month_err)
+best_par_combined <- which.max(results$score)
+best_param_id <- results$id[best_par_combined]
+print(paste("Best parameter ID:", best_param_id))
+```
+
+## Part 2 Calibration: Maximum Likelihood Estimate for Streamflow Components Using performance metrics as weights
+
+### Step 1: Create weights from performance metrics
+```{r}
+weights <- exp(results$score - max(results$score, na.rm = TRUE))
+# Normalize weights so they sum to 1
+weights <- weights / sum(weights, na.rm = TRUE)
+```
+
+### Step 2: Calculate MLE for daily streamflow
+```{r}
+# Get all model runs
+model_runs <- msage %>% select(-date, -month, -day, -year, -wy, -obs)
+
+# MLE daily streamflow
+mle_daily <- apply(model_runs, 1, function(x) {
+  weighted.mean(x, weights, na.rm = TRUE)
+})
+
+```
+
+### Step 3: Calculate MLE for streamflow component of interest
+```{r}
+# identify which months have the highest flows typically
+monthly_obs <- msage %>% 
+  group_by(month) %>% 
+  summarise(mean_obs = mean(obs, na.rm = TRUE)) %>%
+  arrange(desc(mean_obs))
+
+print("Monthly average observed flows:")
+print(monthly_obs)
+
+# Focus on the peak flow months (months 4-7)
+peak_months <- c(4, 5, 6, 7)
+high_flow_data <- msage %>% filter(month %in% peak_months)
+
+# MLE for high flow period
+high_flow_runs <- high_flow_data %>% select(-date, -month, -day, -year, -wy, -obs)
+mle_high_flow <- apply(high_flow_runs, 1, function(x) {
+  weighted.mean(x, weights, na.rm = TRUE)
+})
+
+# view result
+print(high_flow_runs)
+```
+
+### Step 4: Create comparison dataframe
+```{r}
+# Comparison daily df
+comparison_daily <- data.frame(
+  date = msage$date,
+  observed = msage$obs,
+  mle = mle_daily,
+  month = msage$month,
+  year = msage$year
+)
+
+# comparison high flow df
+comparison_high_flow <- data.frame(
+  date = high_flow_data$date,
+  observed = high_flow_data$obs,
+  mle = mle_high_flow,
+  month = high_flow_data$month,
+  year = high_flow_data$year
+)
+```
+
+### Step 5: Calculate correlations
+```{r}
+# daily correlation calculation 
+cor_daily <- cor(comparison_daily$observed, comparison_daily$mle, use = "complete.obs")
+
+# high flow correlation calculation
+cor_high_flow <- cor(comparison_high_flow$observed, comparison_high_flow$mle, use = "complete.obs")
+
+# print results
+print(paste("Daily streamflow correlation (observed vs MLE):", cor_daily))
+print(paste("High flow period correlation (observed vs MLE):", cor_high_flow))
+```
+
+### Step 6: Create visualization
+```{r}
+# Plot 1: Daily stream flow time series
+# select years
+plot_years <- 2010:2012  
+
+# create daily subset
+daily_subset <- comparison_daily %>% filter(year %in% plot_years)
+
+# save plot as p1
+p1 <- ggplot(daily_subset, aes(x = date)) +
+  geom_line(aes(y = observed, color = "Observed"), alpha = 0.7) +
+  geom_line(aes(y = mle, color = "MLE"), alpha = 0.7) +
+  scale_color_manual(values = c("Observed" = "cornflowerblue", "MLE" = "firebrick")) +
+  labs(title = "Daily Streamflow: Observed vs MLE",
+       subtitle = paste("Correlation =", cor_daily),
+       x = "Date", y = "Streamflow", color = "Series") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plot 2: High flow period time series
+p2 <- ggplot(comparison_high_flow, aes(x = date)) +
+  geom_line(aes(y = observed, color = "Observed"), alpha = 0.7) +
+  geom_line(aes(y = mle, color = "MLE"), alpha = 0.7) +
+  scale_color_manual(values = c("Observed" = "cornflowerblue", "MLE" = "firebrick")) +
+  labs(title = "High Flow Period: Observed vs MLE",
+       subtitle = paste("Correlation =", cor_daily),
+       x = "Date", y = "Streamflow", color = "Series") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plot 3: Scatter plot for daily flows
+p3 <- ggplot(comparison_daily, aes(x = observed, y = mle)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "firebrick", linetype = "dashed") +
+  labs(title = "Daily Flow: Observed vs MLE",
+       subtitle = paste("R =", cor_daily),
+       x = "Observed Streamflow", y = "MLE Streamflow") +
+  theme_minimal()
+
+# Plot 4: Scatter plot for high flow period
+p4 <- ggplot(comparison_high_flow, aes(x = observed, y = mle)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "firebrick", linetype = "dashed") +
+  labs(title = "High Flow: Observed vs MLE",
+       subtitle = paste("R =", cor_high_flow),
+       x = "Observed Streamflow", y = "MLE Streamflow") +
+  theme_minimal()
+
+# Combine plots
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+```
+
+### Step 7: Additional analysis - Monthly aggregation
+```{r}
+# create a df for monthly comparison data
+monthly_comparison <- comparison_daily %>%
+  group_by(year, month) %>%
+  summarize(obs_monthly = mean(observed, na.rm = TRUE),
+            mle_monthly = mean(mle, na.rm = TRUE),
+            .groups = 'drop')
+
+# monthly correlation df
+cor_monthly <- cor(monthly_comparison$obs_monthly,
+                   monthly_comparison$mle_monthly, use = "complete.obs")
+
+# print results
+print(paste("Monthly average correlation (observed vs MLE):", cor_monthly))
+```
+
+### Step 8: Performance summary
+```{r}
+# print performance summaries
+cat(sprintf("\nMLE Performance Summary:\n
+Daily streamflow correlation: %f
+High flow period correlation: %f
+Monthly average correlation: %f\n",
+cor_daily, cor_high_flow, cor_monthly))
+```
+
+## Results Reflection
+The Maximum Likelihood Estimate using performance-weighted parameter sets achieved strong correlations with observed stream flow, with daily flows showing a correlation of about 0.795 and high flow periods performing even better at about 0.846. The MLE approach was particularly effective for capturing stream flow patterns during peak flow months, demonstrating that ensemble weighting based on calibration performance metrics successfully improved model predictions over individual parameter sets.
