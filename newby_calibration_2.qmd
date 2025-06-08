@@ -22,7 +22,7 @@ source(here("compute_highflowmetrics.R"))
 msage <- readRDS(here('msage.RDS'))
 ```
 
-## Part 1 Calibration 
+## Part 1 Calibration Recap
 ```{r}
 # Apply metrics to all runs
 msagel = msage %>% gather(key="run", value="str", -date, -month, -day, -year, -wy, -obs)
@@ -124,9 +124,6 @@ high_flow_runs <- high_flow_data %>% select(-date, -month, -day, -year, -wy, -ob
 mle_high_flow <- apply(high_flow_runs, 1, function(x) {
   weighted.mean(x, weights, na.rm = TRUE)
 })
-
-# view result
-print(high_flow_runs)
 ```
 
 ### Step 4: Create comparison dataframe
